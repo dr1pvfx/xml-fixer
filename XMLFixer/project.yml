@@ -37,7 +37,7 @@ targets:
         CFBundleName: RPB XML Toolkit
         CFBundleDisplayName: RPB XML Toolkit
         CFBundleIdentifier: com.xmlfixer.XMLFixer
-        CFBundleVersion: "11"
+        CFBundleVersion: "12"
         CFBundleShortVersionString: "1.0.0"
         CFBundlePackageType: APPL
         CFBundleExecutable: "$(EXECUTABLE_NAME)"

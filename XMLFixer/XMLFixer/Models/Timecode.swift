@@ -10,7 +10,10 @@ struct Timecode: Equatable, CustomStringConvertible {
     let isDropFrame: Bool
 
     var totalFrames: Int {
-        (hours * 3600 + minutes * 60 + seconds) * timebase + frames
+        let nominal = (hours * 3600 + minutes * 60 + seconds) * timebase + frames
+        guard isDropFrame, timebase == 30 || timebase == 60 else { return nominal }
+        let totalMinutes = hours * 60 + minutes
+        return nominal - (timebase / 15) * (totalMinutes - totalMinutes / 10)
     }
 
     var description: String {
@@ -20,10 +23,36 @@ struct Timecode: Equatable, CustomStringConvertible {
 
     /// Parse "HH:MM:SS:FF" or "HH:MM:SS;FF" string
     static func parse(_ string: String, timebase: Int, dropFrame: Bool = false) -> Timecode? {
-        let cleaned = string.replacingOccurrences(of: ";", with: ":")
-        let parts = cleaned.split(separator: ":").compactMap { Int($0) }
-        guard parts.count == 4 else { return nil }
-        return Timecode(hours: parts[0], minutes: parts[1], seconds: parts[2], frames: parts[3], timebase: timebase, isDropFrame: dropFrame)
+        guard timebase > 0 else { return nil }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned: String
+        if !trimmed.isEmpty && trimmed.allSatisfy({ $0.isASCII && $0.isNumber }) {
+            guard trimmed.count <= 8 else { return nil }
+            let digits = String(repeating: "0", count: 8 - trimmed.count) + trimmed
+            cleaned = stride(from: 0, to: 8, by: 2).map { offset in
+                String(digits.dropFirst(offset).prefix(2))
+            }.joined(separator: ":")
+        } else {
+            cleaned = trimmed.replacingOccurrences(of: ";", with: ":")
+        }
+        let fields = cleaned.split(separator: ":", omittingEmptySubsequences: false)
+        if fields.count < 4 && fields.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) {
+            return parse(fields.joined(), timebase: timebase, dropFrame: dropFrame)
+        }
+        guard fields.count == 4,
+              fields.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }) else { return nil }
+        let parts = fields.compactMap { Int($0) }
+        guard parts.count == 4, (0...23).contains(parts[0]),
+              (0...59).contains(parts[1]), (0...59).contains(parts[2]),
+              (0..<timebase).contains(parts[3]) else { return nil }
+        let isDF = dropFrame || trimmed.contains(";")
+        if isDF {
+            guard timebase == 30 || timebase == 60 else { return nil }
+            // Drop-frame labels omit the first 2 (or 4) numbers each minute,
+            // except every tenth minute.
+            if parts[1] % 10 != 0 && parts[2] == 0 && parts[3] < timebase / 15 { return nil }
+        }
+        return Timecode(hours: parts[0], minutes: parts[1], seconds: parts[2], frames: parts[3], timebase: timebase, isDropFrame: isDF)
     }
 
     /// Create from total frame count
@@ -31,8 +60,19 @@ struct Timecode: Equatable, CustomStringConvertible {
         guard timebase > 0 else {
             return Timecode(hours: 0, minutes: 0, seconds: 0, frames: 0, timebase: timebase, isDropFrame: dropFrame)
         }
-        let f = totalFrames % timebase
-        let totalSeconds = totalFrames / timebase
+        var labelledFrames = max(0, totalFrames)
+        if dropFrame && (timebase == 30 || timebase == 60) {
+            let drop = timebase / 15
+            let framesPerTenMinutes = timebase * 600 - drop * 9
+            let tens = labelledFrames / framesPerTenMinutes
+            let remainder = labelledFrames % framesPerTenMinutes
+            labelledFrames += drop * 9 * tens
+            if remainder >= drop {
+                labelledFrames += drop * ((remainder - drop) / (timebase * 60 - drop))
+            }
+        }
+        let f = labelledFrames % timebase
+        let totalSeconds = labelledFrames / timebase
         let s = totalSeconds % 60
         let totalMinutes = totalSeconds / 60
         let m = totalMinutes % 60

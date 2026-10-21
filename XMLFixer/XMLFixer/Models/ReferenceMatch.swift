@@ -45,6 +45,7 @@ struct ReferenceMatch: Identifiable {
     var selectedCandidateIndex: Int?
     var status: ReferenceMatchStatus
     var userConfirmed: Bool
+    var ignoreReferenceTimecode: Bool = false
 
     init(id: UUID = UUID(), sequenceID: UUID, sequenceName: String, parentDocumentID: UUID, accessScopeURL: URL? = nil, candidates: [ReferenceCandidate] = [], selectedCandidateIndex: Int? = nil, status: ReferenceMatchStatus = .unmatched, userConfirmed: Bool = false) {
         self.id = id

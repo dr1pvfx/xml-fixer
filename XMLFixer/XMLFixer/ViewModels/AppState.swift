@@ -534,6 +534,7 @@ final class AppState {
     }
 
     func refreshTimelineData() {
+        defer { refreshPlaybackAlignment() }
         guard let seqID = selectedSequenceID else {
             currentTimelineData = nil
             return
@@ -625,7 +626,9 @@ final class AppState {
         var count = 0
         for doc in documents {
             for seq in doc.sequences {
-                guard let elemID = seq.sequenceElementID else { continue }
+                guard let elemID = seq.sequenceElementID,
+                      let tc = Timecode.parse(newTC, timebase: seq.timebase ?? 25, dropFrame: displayFormat == "DF") else { continue }
+                let frame = tc.totalFrames
                 if FCPXMLMutator.updateSequenceTimecode(
                     in: doc, sequenceElementID: elemID,
                     timecodeString: newTC, frame: frame,
@@ -655,6 +658,24 @@ final class AppState {
         autoLoadReferencePlayer()
     }
 
+    func setIgnoreReferenceTimecode(_ ignore: Bool) {
+        guard let id = selectedSequenceID, referenceMatches[id] != nil else { return }
+        referenceMatches[id]?.ignoreReferenceTimecode = ignore
+        refreshPlaybackAlignment()
+    }
+
+    private func refreshPlaybackAlignment() {
+        guard let timeline = currentTimelineData,
+              let match = referenceMatches[timeline.sequenceID] else { return }
+        playbackCoordinator?.updateAlignment(
+            timelineStartTC: Timecode.fromFrames(timeline.startTimecodeFrame, timebase: timeline.timebase,
+                dropFrame: documents.flatMap(\.sequences).first { $0.id == timeline.sequenceID }?.startTimecodeDisplayFormat == "DF"),
+            referenceStartTC: match.selectedTimecode,
+            ignoreReferenceTimecode: match.ignoreReferenceTimecode,
+            timelineFrame: playheadFrame
+        )
+    }
+
     func matchTimecodeToReference(sequenceID: UUID) {
         guard let match = referenceMatches[sequenceID],
               let tc = match.selectedTimecode else {
@@ -682,7 +703,8 @@ final class AppState {
     var currentRecordTimecode: String {
         guard let timeline = currentTimelineData else { return "00:00:00:00" }
         let startFrame = timeline.startTimecodeFrame
-        let tc = Timecode.fromFrames(startFrame + playheadFrame, timebase: timeline.timebase)
+        let isDF = documents.flatMap(\.sequences).first { $0.id == timeline.sequenceID }?.startTimecodeDisplayFormat == "DF"
+        let tc = Timecode.fromFrames(startFrame + playheadFrame, timebase: timeline.timebase, dropFrame: isDF)
         return tc.description
     }
 
@@ -757,7 +779,7 @@ final class AppState {
         let startTCFrame = seq?.startTimecodeFrame ?? 0
         let isDF = seq?.startTimecodeDisplayFormat == "DF"
         let startTC = Timecode.fromFrames(startTCFrame, timebase: timebase, dropFrame: isDF)
-        let refTC = match.selectedTimecode ?? Timecode.fromFrames(0, timebase: timebase)
+        let refTC = match.selectedTimecode
         let totalFrames = currentTimelineData?.totalDurationFrames ?? 0
 
         let coordinator = PlaybackCoordinator(
@@ -766,7 +788,9 @@ final class AppState {
             timelineStartTC: startTC,
             referenceStartTC: refTC,
             timebase: timebase,
-            totalDurationFrames: totalFrames
+            totalDurationFrames: totalFrames,
+            ntsc: seq?.ntsc ?? false,
+            ignoreReferenceTimecode: match.ignoreReferenceTimecode
         )
 
         coordinator.onPlayheadFrameChanged = { [weak self] frame in
@@ -774,6 +798,7 @@ final class AppState {
         }
 
         self.playbackCoordinator = coordinator
+        coordinator.seekToTimelineFrame(playheadFrame)
     }
 
     // MARK: - Undo Actions
@@ -915,7 +940,7 @@ final class AppState {
                 // If <frame> element is missing but <string> is present, parse TC string
                 let seqTimebase = (try? elem.nodes(forXPath: "rate/timebase"))?.first?.stringValue.flatMap { Int($0) } ?? 25
                 if (startTCFrame == nil || startTCFrame == 0), let tcStr = startTCString,
-                   let parsed = Timecode.parse(tcStr, timebase: seqTimebase) {
+                   let parsed = Timecode.parse(tcStr, timebase: seqTimebase, dropFrame: startTCDisplayFormat == "DF") {
                     startTCFrame = parsed.totalFrames
                 }
 
@@ -948,102 +973,202 @@ final class AppState {
 @Observable
 class PlaybackCoordinator {
     let player: AVPlayer
-    var isPlaying = false
-    var currentTimecodeString = "00:00:00:00"
-    var scrubPosition: Double = 0
+    private(set) var isPlaying = false
+    private(set) var currentTimecodeString = "00:00:00:00"
+    private(set) var scrubPosition: Double = 0
+    private(set) var timelineFrame = 0
+    private(set) var referenceDuration: CMTime?
+    private(set) var isSeeking = false
 
     private let accessScopeURL: URL?
     private let isAccessingSecurityScopedURL: Bool
-    private let timelineStartTC: Timecode
-    private let referenceStartTC: Timecode
+    private var timelineStartTC: Timecode
+    private var referenceStartTC: Timecode?
+    private var referenceFrameDuration: CMTime?
+    private var ignoreReferenceTimecode: Bool
     private let timebase: Int
     private let totalDurationFrames: Int
-    private var timeObserver: Any?
+    private let ntsc: Bool
+    private var playbackTimer: Timer?
+    private var playbackStartTime: TimeInterval = 0
+    private var playbackStartFrame = 0
+    private var seekGeneration = 0
+    private var durationTask: Task<Void, Never>?
+    private var endObserver: NSObjectProtocol?
 
     var onPlayheadFrameChanged: ((Int) -> Void)?
 
-    init(referenceURL: URL, accessScopeURL: URL? = nil, timelineStartTC: Timecode, referenceStartTC: Timecode, timebase: Int, totalDurationFrames: Int) {
+    var frameDuration: CMTime {
+        CMTime(value: ntsc ? 1001 : 1, timescale: CMTimeScale(timebase * (ntsc ? 1000 : 1)))
+    }
+
+    /// Signed media time: never clamp this value to the first/last reference image.
+    func referenceTime(forTimelineFrame frame: Int) -> CMTime? {
+        let relative = CMTimeMultiply(frameDuration, multiplier: Int32(clamping: frame))
+        if ignoreReferenceTimecode { return relative }
+        guard let referenceStartTC else { return nil }
+        let timelineStart = CMTimeMultiply(frameDuration, multiplier: Int32(clamping: timelineStartTC.totalFrames))
+        let refDuration = referenceFrameDuration ?? CMTime(value: ntsc ? 1001 : 1,
+            timescale: CMTimeScale(referenceStartTC.timebase * (ntsc ? 1000 : 1)))
+        let refStart = CMTimeMultiply(refDuration, multiplier: Int32(clamping: referenceStartTC.totalFrames))
+        return timelineStart + relative - refStart
+    }
+
+    var isWithinReferenceRange: Bool {
+        guard let time = referenceTime(forTimelineFrame: timelineFrame), let referenceDuration else { return false }
+        return time >= .zero && time < referenceDuration
+            && timelineFrame >= 0 && timelineFrame < totalDurationFrames
+    }
+
+    var referenceStatusMessage: String? {
+        if !ignoreReferenceTimecode && referenceStartTC == nil {
+            return "No reference timecode — enable Ignore reference timecode to align first frames"
+        }
+        guard referenceDuration != nil else { return "Loading reference…" }
+        if !isWithinReferenceRange { return "Out of reference range" }
+        return isSeeking ? "Loading reference…" : nil
+    }
+
+    init(referenceURL: URL, accessScopeURL: URL? = nil, timelineStartTC: Timecode,
+         referenceStartTC: Timecode?, timebase: Int, totalDurationFrames: Int,
+         ntsc: Bool = false, ignoreReferenceTimecode: Bool = false) {
         self.accessScopeURL = accessScopeURL
         self.isAccessingSecurityScopedURL = accessScopeURL?.startAccessingSecurityScopedResource() ?? false
         self.timelineStartTC = timelineStartTC
         self.referenceStartTC = referenceStartTC
-        self.timebase = timebase
+        self.ignoreReferenceTimecode = ignoreReferenceTimecode
+        self.timebase = max(1, timebase)
         self.totalDurationFrames = totalDurationFrames
+        self.ntsc = ntsc
 
-        let asset = AVAsset(url: referenceURL)
-        let playerItem = AVPlayerItem(asset: asset)
-        self.player = AVPlayer(playerItem: playerItem)
+        let asset = AVURLAsset(url: referenceURL)
+        self.player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime,
+            object: player.currentItem, queue: .main) { [weak self] _ in
+                self?.player.pause()
+            }
+        durationTask = Task { [weak self] in
+            guard var duration = try? await asset.load(.duration), duration.isNumeric else { return }
+            if let video = try? await asset.loadTracks(withMediaType: .video).first,
+               let range = try? await video.load(.timeRange) {
+                duration = CMTimeRangeGetEnd(range)
+            }
+            var tcFrameDuration: CMTime?
+            if let track = try? await asset.loadTracks(withMediaType: .timecode).first,
+               let format = try? await track.load(.formatDescriptions).first {
+                let value = CMTimeCodeFormatDescriptionGetFrameDuration(format)
+                if value.isNumeric && value > .zero { tcFrameDuration = value }
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.referenceFrameDuration = tcFrameDuration
+                self.referenceDuration = duration
+                self.seekToTimelineFrame(self.timelineFrame)
+            }
+        }
+    }
 
-        setupTimeObserver()
+    func updateAlignment(timelineStartTC: Timecode, referenceStartTC: Timecode?,
+                         ignoreReferenceTimecode: Bool, timelineFrame: Int) {
+        self.timelineStartTC = timelineStartTC
+        self.referenceStartTC = referenceStartTC
+        self.ignoreReferenceTimecode = ignoreReferenceTimecode
+        seekToTimelineFrame(timelineFrame)
     }
 
     func togglePlayPause() {
         if isPlaying {
-            player.pause()
-        } else {
-            player.play()
+            pause()
+            return
         }
-        isPlaying.toggle()
+        guard totalDurationFrames > 0 else { return }
+        if timelineFrame >= totalDurationFrames - 1 { seekToTimelineFrame(0) }
+        isPlaying = true
+        playbackStartFrame = timelineFrame
+        playbackStartTime = ProcessInfo.processInfo.systemUptime
+        synchronizePlayer()
+        // The sequence clock keeps running through gaps before and after the reference.
+        let timer = Timer(timeInterval: frameDuration.seconds, repeats: true) { [weak self] _ in
+            self?.advancePlayback()
+        }
+        playbackTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func pause() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+        player.pause()
+        isPlaying = false
     }
 
     func stepForward() {
-        player.pause()
-        isPlaying = false
-        let current = player.currentTime()
-        let oneFrame = CMTime(value: 1, timescale: CMTimeScale(timebase))
-        player.seek(to: current + oneFrame, toleranceBefore: .zero, toleranceAfter: .zero)
+        pause()
+        seekToTimelineFrame(timelineFrame + 1)
     }
 
     func stepBackward() {
-        player.pause()
-        isPlaying = false
-        let current = player.currentTime()
-        let oneFrame = CMTime(value: 1, timescale: CMTimeScale(timebase))
-        let target = CMTimeMaximum(current - oneFrame, .zero)
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        pause()
+        seekToTimelineFrame(timelineFrame - 1)
     }
 
     func seekToTimelineFrame(_ frame: Int) {
-        let absoluteTC = timelineStartTC.adding(frames: frame)
-        let refFrameOffset = absoluteTC.framesDifference(from: referenceStartTC)
-        let cmTime = CMTime(value: CMTimeValue(max(0, refFrameOffset)), timescale: CMTimeScale(timebase))
-        player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        updateTimecodeDisplay(from: cmTime)
+        timelineFrame = min(max(0, frame), max(0, totalDurationFrames - 1))
+        playbackStartFrame = timelineFrame
+        playbackStartTime = ProcessInfo.processInfo.systemUptime
+        updateTimecodeDisplay()
+        synchronizePlayer()
     }
 
     func scrubToPosition(_ position: Double) {
-        guard let duration = player.currentItem?.duration, duration.isNumeric else { return }
-        let targetTime = CMTimeMultiplyByFloat64(duration, multiplier: position)
-        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        updateTimecodeDisplay(from: targetTime)
+        seekToTimelineFrame(Int((Double(max(0, totalDurationFrames - 1)) * min(1, max(0, position))).rounded()))
     }
 
-    private func setupTimeObserver() {
-        let interval = CMTime(value: 1, timescale: CMTimeScale(timebase))
-        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            self?.updateTimecodeDisplay(from: time)
+    private func advancePlayback() {
+        guard !isSeeking else { return }
+        let elapsed = ProcessInfo.processInfo.systemUptime - playbackStartTime
+        let next = playbackStartFrame + Int((elapsed / frameDuration.seconds).rounded(.down))
+        let wasInRange = isWithinReferenceRange
+        timelineFrame = min(next, max(0, totalDurationFrames - 1))
+        updateTimecodeDisplay()
+        if wasInRange != isWithinReferenceRange { synchronizePlayer() }
+        if next >= totalDurationFrames { pause() }
+    }
+
+    private func synchronizePlayer() {
+        seekGeneration += 1
+        let generation = seekGeneration
+        player.pause()
+        player.currentItem?.cancelPendingSeeks()
+        guard isWithinReferenceRange, let time = referenceTime(forTimelineFrame: timelineFrame) else {
+            isSeeking = false
+            return
+        }
+        isSeeking = true
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.seekGeneration else { return }
+                self.isSeeking = !finished
+                if finished && self.isPlaying && self.isWithinReferenceRange {
+                    self.playbackStartFrame = self.timelineFrame
+                    self.playbackStartTime = ProcessInfo.processInfo.systemUptime
+                    self.player.play()
+                }
+            }
         }
     }
 
-    private func updateTimecodeDisplay(from time: CMTime) {
-        guard timebase > 0 else { return }
-        let refFrame = Int(time.seconds * Double(timebase))
-        let absoluteTC = referenceStartTC.adding(frames: refFrame)
-        let timelineFrame = absoluteTC.framesDifference(from: timelineStartTC)
-
-        currentTimecodeString = absoluteTC.description
-        if totalDurationFrames > 0 {
-            scrubPosition = Double(max(0, timelineFrame)) / Double(totalDurationFrames)
-        }
-        onPlayheadFrameChanged?(max(0, timelineFrame))
+    private func updateTimecodeDisplay() {
+        currentTimecodeString = timelineStartTC.adding(frames: timelineFrame).description
+        scrubPosition = totalDurationFrames > 0 ? Double(timelineFrame) / Double(totalDurationFrames) : 0
+        onPlayheadFrameChanged?(timelineFrame)
     }
 
     deinit {
-        if let observer = timeObserver {
-            player.removeTimeObserver(observer)
-        }
-        if isAccessingSecurityScopedURL {
-            accessScopeURL?.stopAccessingSecurityScopedResource()
-        }
+        playbackTimer?.invalidate()
+        durationTask?.cancel()
+        player.pause()
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if isAccessingSecurityScopedURL { accessScopeURL?.stopAccessingSecurityScopedResource() }
     }
 }

@@ -57,8 +57,10 @@ struct FCPXMLParser {
 
             // Parse sequence-level timecode
             let startTCString = seq.singleStringValue(forXPath: "timecode/string")
-            let startTCFrame = seq.singleIntValue(forXPath: "timecode/frame")
             let startTCDisplayFormat = seq.singleStringValue(forXPath: "timecode/displayformat")
+            let startTCFrame = seq.singleIntValue(forXPath: "timecode/frame")
+                ?? startTCString.flatMap { Timecode.parse($0, timebase: seqTimebase ?? 25,
+                    dropFrame: startTCDisplayFormat == "DF")?.totalFrames }
 
             return SequenceInfo(
                 sequenceElementID: seq.attributeValue(forName: "id"),

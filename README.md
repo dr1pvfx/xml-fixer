@@ -13,7 +13,7 @@ timelines, source timecode, and reference video.
 ## Download
 
 Get the latest **Developer ID–signed and Apple-notarized** alpha build from the
-[v1.0.0 Alpha 1 release](https://github.com/dr1pvfx/xml-fixer/releases/tag/v1.0.0-alpha.1).
+[v1.0.0 Alpha 2 release](https://github.com/dr1pvfx/xml-fixer/releases/tag/v1.0.0-alpha.2).
 
 **Requirements:** macOS 14 Sonoma or later.
 
@@ -47,6 +47,21 @@ Get the latest **Developer ID–signed and Apple-notarized** alpha build from th
 All XML mutations are applied to an in-memory document and can be undone during
 the session. The original files are not overwritten unless you explicitly choose
 their location as the export destination.
+
+### Reference timecode
+
+References match their embedded timecode by default. For example, a sequence
+starting at `00:59:59:00` with a 25fps reference starting at `01:00:00:00` shows
+one second of **Out of reference range** before the first reference image.
+Changing the sequence start timecode immediately updates the reference alignment.
+
+Select **Ignore reference timecode** in Match Reference Files or the player to
+place reference frame zero at sequence frame zero. Use this for references with
+missing or intentionally unrelated timecode. Areas before or after the reference
+remain blank while the sequence playhead continues normally.
+
+Timecode fields accept compact digits such as `01000000`, insert separators,
+and validate frame numbers against each sequence's frame rate.
 
 ## Built for post workflows
 
