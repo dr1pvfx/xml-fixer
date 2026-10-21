@@ -28,6 +28,7 @@
 		4B575A4A45A228DDB91D89BE /* ToolbarActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC613C5D0150F3809D8153C0 /* ToolbarActions.swift */; };
 		4C3ACD8F26AC51196C1E5300 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E66CE82E43D2811715A388DC /* ContentView.swift */; };
 		4F1951B6B958A2B93BE76453 /* MediaReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 120E69ECCE2C8239E5D6E4B8 /* MediaReference.swift */; };
+		5139AB07B0C7F4C3E267783A /* reference_25fps.mov in Resources */ = {isa = PBXBuildFile; fileRef = D1E3340F3FC03EAC94198146 /* reference_25fps.mov */; };
 		5297510D4D79FBFAE8CF63BB /* ClipEffect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16DBFA401374563E2B2C578B /* ClipEffect.swift */; };
 		5BB423C59E27A618BA9DE2AD /* DropZoneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9F37037854132CB963670FD /* DropZoneView.swift */; };
 		608AE5DD1BFCC0FFAF341F31 /* ReferenceMatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB5423E81C14BD601366F334 /* ReferenceMatch.swift */; };
@@ -134,6 +135,7 @@
 		C8D19DEFCEE850C522104B73 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		CDE6651A8AA6F5FBA697395F /* TimelineData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineData.swift; sourceTree = "<group>"; };
 		CFFB4321EC2C0F44897B3538 /* BatchRenameTimelinesSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchRenameTimelinesSheet.swift; sourceTree = "<group>"; };
+		D1E3340F3FC03EAC94198146 /* reference_25fps.mov */ = {isa = PBXFileReference; lastKnownFileType = video.quicktime; path = reference_25fps.mov; sourceTree = "<group>"; };
 		D452E311C8D9A010FF0FCBEB /* FileScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileScanner.swift; sourceTree = "<group>"; };
 		D5D82BA762212D2197FB58D3 /* BatchTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchTypes.swift; sourceTree = "<group>"; };
 		DAA5098B8D75AFD7336CCBC0 /* TimecodeUtil.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimecodeUtil.swift; sourceTree = "<group>"; };
@@ -283,6 +285,7 @@
 		798EB40D08E92FD8388173CE /* Fixtures */ = {
 			isa = PBXGroup;
 			children = (
+				D1E3340F3FC03EAC94198146 /* reference_25fps.mov */,
 				88597665DCFBCD6706B2D7B8 /* sample_sequence.xml */,
 			);
 			path = Fixtures;
@@ -417,7 +420,6 @@
 				};
 			};
 			buildConfigurationList = D5DCCFE7824150887E83C182 /* Build configuration list for PBXProject "XMLFixer" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -427,6 +429,7 @@
 			mainGroup = D77EFF02C10C1108E657AE15;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			productRefGroup = 683953FB8F4D19F1DEFBE62A /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -449,6 +452,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5139AB07B0C7F4C3E267783A /* reference_25fps.mov in Resources */,
 				B0A03C8F8D3DD666AD30D151 /* sample_sequence.xml in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

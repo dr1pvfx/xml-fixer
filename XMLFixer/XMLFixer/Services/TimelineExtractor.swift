@@ -46,7 +46,7 @@ struct TimelineExtractor {
 
         // If <frame> element is missing but <string> is present, parse the TC string
         if startTCFrame == 0, let tcString = startTCString,
-           let parsed = Timecode.parse(tcString, timebase: timebase) {
+           let parsed = Timecode.parse(tcString, timebase: timebase, dropFrame: seqElem.singleStringValue(forXPath: "timecode/displayformat") == "DF") {
             startTCFrame = parsed.totalFrames
         }
 

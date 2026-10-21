@@ -72,12 +72,15 @@ extract_team_from_identity() {
 
 build_app() {
   echo "==> Building $APP_NAME ($CONFIGURATION)"
-  remove_path_if_exists "$DERIVED_DATA_PATH"
   xcodebuild \
+    -project "$PROJECT_DIR/XMLFixer.xcodeproj" \
     -scheme "$SCHEME" \
     -configuration "$CONFIGURATION" \
     -derivedDataPath "$DERIVED_DATA_PATH" \
-    build
+    build \
+    CODE_SIGNING_ALLOWED=NO \
+    ONLY_ACTIVE_ARCH=NO \
+    ARCHS="arm64 x86_64"
   [[ -d "$UNSIGNED_APP_PATH" ]] || fail "Build output not found at '$UNSIGNED_APP_PATH'."
 }
 
@@ -97,6 +100,7 @@ sign_app() {
     --force \
     --deep \
     --options runtime \
+    --entitlements "$PROJECT_DIR/XMLFixer/XMLFixer.entitlements" \
     --timestamp \
     --sign "$SIGNING_IDENTITY" \
     "$SIGNED_APP_PATH"

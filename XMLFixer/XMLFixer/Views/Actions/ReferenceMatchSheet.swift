@@ -10,6 +10,7 @@ struct ReferenceMatchSheet: View {
     @State private var matches: [ReferenceMatch] = []
     @State private var isScanning = false
     @State private var isReadingTimecodes = false
+    @State private var ignoreReferenceTimecode = false
     @State private var strictMode = true
     @State private var minChars: Double = 6
     @State private var extensionFilter = "mov,mp4"
@@ -59,6 +60,14 @@ struct ReferenceMatchSheet: View {
             // Matching options
             GroupBox("Matching Options") {
                 VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Ignore reference timecode", isOn: $ignoreReferenceTimecode)
+                        .toggleStyle(.checkbox)
+                    Text(ignoreReferenceTimecode
+                         ? "Reference frame zero starts at the first frame of each sequence."
+                         : "Match embedded reference timecode. Frames outside its range are blank.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Toggle("Strict (exact sequence name match)", isOn: $strictMode)
                         .toggleStyle(.checkbox)
                         .onChange(of: strictMode) { runMatching() }
@@ -145,6 +154,7 @@ struct ReferenceMatchSheet: View {
                     let scopedMatches = matches.map { match in
                         var copy = match
                         copy.accessScopeURL = referenceDirectory
+                        copy.ignoreReferenceTimecode = ignoreReferenceTimecode
                         return copy
                     }
                     appState.applyReferenceMatches(scopedMatches)
@@ -247,13 +257,13 @@ struct ReferenceMatchSheet: View {
         guard !matches.isEmpty else { return }
         isReadingTimecodes = true
         let accessScopeURL = referenceDirectory
-        let timebase = appState.documents.first?.sequences.first?.timebase ?? 25
 
         // Capture snapshot: list of (matchIndex, candidateIndex, url) to read
-        var jobs: [(matchID: UUID, candidateID: UUID, url: URL)] = []
+        var jobs: [(candidateID: UUID, url: URL, timebase: Int)] = []
         for match in matches {
             for candidate in match.candidates {
-                jobs.append((matchID: match.id, candidateID: candidate.id, url: candidate.url))
+                let timebase = appState.documents.flatMap(\.sequences).first { $0.id == match.sequenceID }?.timebase ?? 25
+                jobs.append((candidateID: candidate.id, url: candidate.url, timebase: timebase))
             }
         }
 
@@ -268,7 +278,7 @@ struct ReferenceMatchSheet: View {
             // Read all timecodes from snapshot
             var results: [(candidateID: UUID, tc: Timecode)] = []
             for job in jobs {
-                if let tc = await AVAssetTimecodeReader.readStartTimecode(from: job.url, timebase: timebase) {
+                if let tc = await AVAssetTimecodeReader.readStartTimecode(from: job.url, timebase: job.timebase) {
                     results.append((candidateID: job.candidateID, tc: tc))
                 }
             }

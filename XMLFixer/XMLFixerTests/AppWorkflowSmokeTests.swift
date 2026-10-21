@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import XML_Fixer
 
 final class AppWorkflowSmokeTests: XCTestCase {
@@ -41,6 +42,160 @@ final class AppWorkflowSmokeTests: XCTestCase {
         try exerciseCleanXMLExport(appState: appState)
         try exerciseSourcesXMLExport(appState: appState)
         try await exerciseReferenceMatching(appState: appState, sequence: sequence)
+    }
+
+    func testCompactTimecodeInputAndValidation() throws {
+        for (input, expected) in [("000000", "00:00:00:00"), ("01000000", "01:00:00:00"),
+                                  ("123456", "00:12:34:56"), ("00:59:59:00", "00:59:59:00")] {
+            let formatted = TimecodeUtil.formatInput(input)
+            XCTAssertEqual(Timecode.parse(formatted, timebase: 60)?.description, expected)
+        }
+        XCTAssertEqual(TimecodeUtil.formatInput("01000000"), "01:00:00:00")
+        XCTAssertNil(Timecode.parse("00:00:00:25", timebase: 25))
+        XCTAssertNil(Timecode.parse("00:60:00:00", timebase: 25))
+        XCTAssertNil(Timecode.parse("24:00:00:00", timebase: 25))
+        XCTAssertNil(Timecode.parse("bad:00:00:00:00", timebase: 25))
+        XCTAssertNil(Timecode.parse("00:00:00:00", timebase: 25, dropFrame: true))
+    }
+
+    func testDropFrameRoundTripAndSkippedLabels() throws {
+        for timebase in [30, 60] {
+            for frame in [0, 1799, 1800, 17982, 107892, 215784, 2589407] {
+                let tc = Timecode.fromFrames(frame, timebase: timebase, dropFrame: true)
+                XCTAssertEqual(Timecode.parse(tc.description, timebase: timebase)?.totalFrames, frame)
+            }
+        }
+        XCTAssertEqual(Timecode.parse("01:00:00;00", timebase: 30)?.totalFrames, 107892)
+        XCTAssertNil(Timecode.parse("00:01:00;00", timebase: 30))
+        XCTAssertEqual(Timecode.fromFrames(1800, timebase: 30, dropFrame: true).description, "00:01:00;02")
+    }
+
+    private var referenceFixtureURL: URL {
+        Bundle(for: type(of: self)).url(forResource: "reference_25fps", withExtension: "mov")
+            ?? URL(fileURLWithPath: #file).deletingLastPathComponent().appendingPathComponent("Fixtures/reference_25fps.mov")
+    }
+
+    @MainActor
+    func testEmbeddedReferenceTimecodeAndRangeBoundaries() async throws {
+        let embedded = await AVAssetTimecodeReader.readStartTimecode(from: referenceFixtureURL, timebase: 25)
+        let tc = try XCTUnwrap(embedded)
+        XCTAssertEqual(tc.description, "01:00:00:00")
+        let coordinator = PlaybackCoordinator(referenceURL: referenceFixtureURL,
+            timelineStartTC: try XCTUnwrap(Timecode.parse("00:59:59:00", timebase: 25)),
+            referenceStartTC: tc, timebase: 25, totalDurationFrames: 100)
+        try await waitForReference(coordinator)
+        coordinator.seekToTimelineFrame(0)
+        XCTAssertEqual(coordinator.timelineFrame, 0)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 0)?.seconds, -1)
+        XCTAssertFalse(coordinator.isWithinReferenceRange)
+        coordinator.seekToTimelineFrame(24)
+        XCTAssertFalse(coordinator.isWithinReferenceRange)
+        coordinator.stepForward()
+        XCTAssertEqual(coordinator.timelineFrame, 25)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 25)?.seconds, 0)
+        XCTAssertTrue(coordinator.isWithinReferenceRange)
+        coordinator.seekToTimelineFrame(74)
+        XCTAssertTrue(coordinator.isWithinReferenceRange)
+        coordinator.stepForward()
+        XCTAssertFalse(coordinator.isWithinReferenceRange)
+        XCTAssertEqual(coordinator.timelineFrame, 75)
+        coordinator.stepBackward()
+        XCTAssertTrue(coordinator.isWithinReferenceRange)
+    }
+
+    @MainActor
+    func testSequenceTCEditBatchUndoAndIgnoreModeRefreshAlignment() async throws {
+        let state = AppState()
+        let changedFixture = tempRoot.appendingPathComponent("sequence_25fps.xml")
+        let fixtureText = try String(contentsOf: fixtureURL)
+            .replacingOccurrences(of: "<timebase>24</timebase>", with: "<timebase>25</timebase>")
+        try fixtureText.write(to: changedFixture, atomically: true, encoding: .utf8)
+        let doc = try FCPXMLParser.parse(url: changedFixture)
+        state.documents = [doc]
+        let sequence = try XCTUnwrap(doc.sequences.first { $0.name == "Test Timeline" })
+        state.selectedSequenceID = sequence.id
+        state.refreshTimelineData()
+        let referenceTC = try XCTUnwrap(Timecode.parse("01:00:00:00", timebase: 25))
+        state.applyReferenceMatches([ReferenceMatch(sequenceID: sequence.id, sequenceName: sequence.name,
+            parentDocumentID: doc.id, candidates: [ReferenceCandidate(url: referenceFixtureURL,
+                filenameStem: "reference_25fps", fileExtension: "mov", fileSize: 1, embeddedTimecode: referenceTC)],
+            selectedCandidateIndex: 0, status: .matched)])
+        let coordinator = try XCTUnwrap(state.playbackCoordinator)
+        try await waitForReference(coordinator)
+        state.updateSequenceTimecode(sequenceID: sequence.id, newTC: "00:59:59:00", frame: 89975, displayFormat: "NDF")
+        state.seekPlayhead(toFrame: 0)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 0)?.seconds, -1)
+        XCTAssertFalse(coordinator.isWithinReferenceRange)
+        XCTAssertEqual(state.playheadFrame, 0)
+        state.seekPlayhead(toFrame: 25)
+        XCTAssertTrue(coordinator.isWithinReferenceRange)
+        state.updateSequenceTimecode(sequenceID: sequence.id, newTC: "01:00:00:00", frame: 90000, displayFormat: "NDF")
+        XCTAssertTrue(state.playbackCoordinator === coordinator)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 25)?.seconds, 1)
+        XCTAssertEqual(state.playheadFrame, 25)
+        XCTAssertEqual(try doc.xmlDocument.nodes(forXPath: "//sequence[@id='\(sequence.sequenceElementID!)']/timecode/frame").first?.stringValue, "90000")
+        state.undo()
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 25)?.seconds, 0)
+        state.setIgnoreReferenceTimecode(true)
+        state.seekPlayhead(toFrame: 0)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 0)?.seconds, 0)
+        XCTAssertTrue(coordinator.isWithinReferenceRange)
+        state.batchUpdateTimecodes(newTC: "01:00:01:00", frame: 90025, displayFormat: "NDF")
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 0)?.seconds, 0)
+        state.setIgnoreReferenceTimecode(false)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 0)?.seconds, 1)
+        state.closeVideoPlayer()
+    }
+
+    func testMissingTimecodeRequiresExplicitIgnoreAndNTSCSeeksAreRational() {
+        let coordinator = PlaybackCoordinator(referenceURL: referenceFixtureURL,
+            timelineStartTC: Timecode.fromFrames(0, timebase: 30), referenceStartTC: nil,
+            timebase: 30, totalDurationFrames: 200, ntsc: true)
+        XCTAssertNil(coordinator.referenceTime(forTimelineFrame: 30))
+        coordinator.updateAlignment(timelineStartTC: Timecode.fromFrames(0, timebase: 30),
+            referenceStartTC: nil, ignoreReferenceTimecode: true, timelineFrame: 30)
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 30)?.seconds ?? 0, 1.001, accuracy: 0.000001)
+    }
+
+    @MainActor
+    func testReferenceUsesItsOwnFrameRateForTimecodeMatching() async throws {
+        let coordinator = PlaybackCoordinator(referenceURL: referenceFixtureURL,
+            timelineStartTC: Timecode.fromFrames(108000, timebase: 30),
+            referenceStartTC: Timecode.fromFrames(90000, timebase: 25),
+            timebase: 30, totalDurationFrames: 200, ntsc: true)
+        try await waitForReference(coordinator)
+        // One hour NDF at 29.97fps is 3603.6 real seconds. The 25fps MOV
+        // starts at 3600 real seconds, without the sequence's NTSC factor.
+        XCTAssertEqual(coordinator.referenceTime(forTimelineFrame: 0)?.seconds ?? 0, 3.6, accuracy: 0.000001)
+    }
+
+    @MainActor
+    func testPlaybackAdvancesThroughLeadingAndTrailingReferenceGaps() async throws {
+        let coordinator = PlaybackCoordinator(referenceURL: referenceFixtureURL,
+            timelineStartTC: Timecode.fromFrames(89975, timebase: 25),
+            referenceStartTC: Timecode.fromFrames(90000, timebase: 25), timebase: 25, totalDurationFrames: 100)
+        try await waitForReference(coordinator)
+        coordinator.seekToTimelineFrame(23)
+        coordinator.togglePlayPause()
+        try await Task.sleep(for: .milliseconds(220))
+        coordinator.togglePlayPause()
+        XCTAssertGreaterThanOrEqual(coordinator.timelineFrame, 25)
+        XCTAssertTrue(coordinator.isWithinReferenceRange)
+        coordinator.seekToTimelineFrame(73)
+        coordinator.togglePlayPause()
+        try await Task.sleep(for: .milliseconds(220))
+        coordinator.togglePlayPause()
+        XCTAssertGreaterThanOrEqual(coordinator.timelineFrame, 75)
+        XCTAssertFalse(coordinator.isWithinReferenceRange)
+    }
+
+    @MainActor
+    private func waitForReference(_ coordinator: PlaybackCoordinator) async throws {
+        for _ in 0..<100 {
+            if coordinator.referenceDuration != nil { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Reference duration did not load")
     }
 
     private func exerciseRelink(appState: AppState) throws {

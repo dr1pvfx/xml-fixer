@@ -26,31 +26,37 @@ enum AVAssetTimecodeReader {
             let reader = try AVAssetReader(asset: asset)
             let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
             reader.add(output)
-            reader.startReading()
+            guard reader.startReading() else { return nil }
+            defer { reader.cancelReading() }
 
-            guard let sampleBuffer = output.copyNextSampleBuffer() else { return nil }
-
-            // Get the timecode format description
-            guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
-
-            let frameQuanta = CMTimeCodeFormatDescriptionGetFrameQuanta(formatDesc)
-            let tcFlags = CMTimeCodeFormatDescriptionGetTimeCodeFlags(formatDesc)
-            let isDropFrame = (tcFlags & UInt32(kCMTimeCodeFlag_DropFrame)) != 0
-
-            // Read the frame number from the sample data
-            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
-            var length = 0
-            var dataPointer: UnsafeMutablePointer<Int8>?
-            CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &dataPointer)
-
-            guard let ptr = dataPointer, length >= 4 else { return nil }
-
-            let frameNumber = ptr.withMemoryRebound(to: Int32.self, capacity: 1) {
-                Int(Int32(bigEndian: $0.pointee))
+            // AVFoundation may emit empty edit-boundary buffers before the first
+            // timecode sample. They carry no format/data and must be skipped.
+            while let sample = output.copyNextSampleBuffer() {
+                guard CMSampleBufferGetNumSamples(sample) > 0,
+                      let format = CMSampleBufferGetFormatDescription(sample),
+                      let block = CMSampleBufferGetDataBuffer(sample) else { continue }
+                let subtype = CMFormatDescriptionGetMediaSubType(format)
+                let byteCount: Int
+                switch subtype {
+                case kCMTimeCodeFormatType_TimeCode32: byteCount = 4
+                case kCMTimeCodeFormatType_TimeCode64: byteCount = 8
+                default: continue
+                }
+                guard CMBlockBufferGetDataLength(block) >= byteCount else { continue }
+                var bytes = [UInt8](repeating: 0, count: byteCount)
+                let status = bytes.withUnsafeMutableBytes {
+                    CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: byteCount, destination: $0.baseAddress!)
+                }
+                guard status == kCMBlockBufferNoErr else { continue }
+                let bits = bytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+                let signed = byteCount == 4 ? Int64(Int32(bitPattern: UInt32(bits))) : Int64(bitPattern: bits)
+                guard let frameNumber = Int(exactly: signed), frameNumber >= 0 else { continue }
+                let quanta = Int(CMTimeCodeFormatDescriptionGetFrameQuanta(format))
+                let flags = CMTimeCodeFormatDescriptionGetTimeCodeFlags(format)
+                return Timecode.fromFrames(frameNumber, timebase: quanta > 0 ? quanta : timebase,
+                    dropFrame: (flags & UInt32(kCMTimeCodeFlag_DropFrame)) != 0)
             }
-
-            let effectiveTimebase = frameQuanta > 0 ? Int(frameQuanta) : timebase
-            return Timecode.fromFrames(frameNumber, timebase: effectiveTimebase, dropFrame: isDropFrame)
+            return nil
         } catch {
             return nil
         }

@@ -6,7 +6,6 @@ struct TimecodeEditSheet: View {
 
     @State private var timecodeText: String = "01:00:00:00"
     @State private var displayFormat: String = "NDF"
-    @State private var batchMode: Bool = false
 
     // The target sequence (if single mode) — set from appState.timecodeEditTargetSequenceID
     private var targetSequence: SequenceInfo? {
@@ -14,10 +13,15 @@ struct TimecodeEditSheet: View {
         return appState.documents.flatMap(\.sequences).first { $0.id == targetID }
     }
 
+    private var targetSequences: [SequenceInfo] {
+        if let targetSequence { return [targetSequence] }
+        return appState.documents.flatMap(\.sequences)
+    }
+
     private var isValid: Bool {
-        let cleaned = timecodeText.replacingOccurrences(of: ";", with: ":")
-        let parts = cleaned.split(separator: ":").compactMap { Int($0) }
-        return parts.count == 4 && parts[0] >= 0 && parts[0] <= 23 && parts[1] >= 0 && parts[1] <= 59 && parts[2] >= 0 && parts[2] <= 59
+        !targetSequences.isEmpty && targetSequences.allSatisfy {
+            Timecode.parse(timecodeText, timebase: $0.timebase ?? 25, dropFrame: displayFormat == "DF") != nil
+        }
     }
 
     private var referenceTC: Timecode? {
@@ -43,10 +47,10 @@ struct TimecodeEditSheet: View {
                 }
 
                 LabeledContent("New Timecode") {
-                    TextField("HH:MM:SS:FF", text: $timecodeText)
-                        .font(.system(.body, design: .monospaced))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 150)
+                    TimecodeTextField(text: $timecodeText,
+                        timebase: targetSequence?.timebase ?? targetSequences.first?.timebase ?? 25,
+                        dropFrame: displayFormat == "DF")
+                        .frame(width: 150, height: 24)
                 }
 
                 Picker("Display Format", selection: $displayFormat) {
@@ -84,7 +88,7 @@ struct TimecodeEditSheet: View {
             .frame(width: 400)
 
             if !isValid {
-                Text("Invalid timecode format. Use HH:MM:SS:FF")
+                Text("Enter a valid timecode for the sequence frame rate (digits or HH:MM:SS:FF).")
                     .font(.caption)
                     .foregroundStyle(.red)
             }
@@ -117,9 +121,69 @@ struct TimecodeEditSheet: View {
         guard let tc = Timecode.parse(timecodeText, timebase: timebase, dropFrame: displayFormat == "DF") else { return }
 
         if let targetID = appState.timecodeEditTargetSequenceID {
-            appState.updateSequenceTimecode(sequenceID: targetID, newTC: timecodeText, frame: tc.totalFrames, displayFormat: displayFormat)
+            appState.updateSequenceTimecode(sequenceID: targetID, newTC: tc.description, frame: tc.totalFrames, displayFormat: displayFormat)
         } else {
-            appState.batchUpdateTimecodes(newTC: timecodeText, frame: tc.totalFrames, displayFormat: displayFormat)
+            appState.batchUpdateTimecodes(newTC: tc.description, frame: tc.totalFrames, displayFormat: displayFormat)
+        }
+    }
+}
+
+/// NSTextField's editor keeps its own string while focused, so update that editor
+/// directly to make separators appear on each keystroke, including paste/delete.
+private struct TimecodeTextField: NSViewRepresentable {
+    @Binding var text: String
+    let timebase: Int
+    let dropFrame: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.placeholderString = "HH:MM:SS:FF"
+        field.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        field.bezelStyle = .roundedBezel
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel("New Timecode")
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text { field.stringValue = text }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: TimecodeTextField
+        init(_ parent: TimecodeTextField) { self.parent = parent }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            let raw = field.stringValue
+            let editor = field.currentEditor()
+            let selection = editor?.selectedRange ?? NSRange(location: raw.utf16.count, length: 0)
+            let prefix = (raw as NSString).substring(to: min(selection.location, raw.utf16.count))
+            let digitsBeforeCaret = prefix.filter { $0.isASCII && $0.isNumber }.count
+            let formatted = TimecodeUtil.formatInput(raw)
+            if raw != formatted {
+                field.stringValue = formatted
+                var caret = 0
+                var digits = 0
+                for character in formatted {
+                    if digits == digitsBeforeCaret { break }
+                    caret += 1
+                    if character.isNumber { digits += 1 }
+                }
+                editor?.selectedRange = NSRange(location: caret, length: 0)
+            }
+            parent.text = formatted
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField,
+                  let tc = Timecode.parse(field.stringValue, timebase: parent.timebase,
+                    dropFrame: parent.dropFrame) else { return }
+            field.stringValue = tc.description
+            parent.text = tc.description
         }
     }
 }

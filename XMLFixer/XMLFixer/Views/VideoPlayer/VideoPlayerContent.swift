@@ -35,6 +35,14 @@ struct VideoPlayerContent: View {
                         }
                 }
 
+                if let message = coordinator?.referenceStatusMessage {
+                    Color.black.overlay {
+                        Text(message)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.65))
+                    }
+                }
+
                 // Source TC overlay
                 if appState.showSourceTCOverlay && !appState.sourceTimecodesAtPlayhead.isEmpty {
                     SourceTCOverlayView(entries: appState.sourceTimecodesAtPlayhead)
@@ -83,6 +91,15 @@ struct VideoPlayerContent: View {
                 }
 
                 Spacer()
+
+                if let id = appState.selectedSequenceID, let match = appState.referenceMatches[id] {
+                    Toggle("Ignore reference timecode", isOn: Binding(
+                        get: { match.ignoreReferenceTimecode },
+                        set: { appState.setIgnoreReferenceTimecode($0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 10))
+                }
 
                 // Source TC overlay toggle
                 Button {
